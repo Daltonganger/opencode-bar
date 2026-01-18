@@ -16,11 +16,11 @@ enum RefreshInterval: Int, CaseIterable {
     
     var title: String {
         switch self {
-        case .tenSeconds: return "10초"
-        case .thirtySeconds: return "30초"
-        case .oneMinute: return "1분"
-        case .fiveMinutes: return "5분"
-        case .thirtyMinutes: return "30분"
+        case .tenSeconds: return "10s"
+        case .thirtySeconds: return "30s"
+        case .oneMinute: return "1m"
+        case .fiveMinutes: return "5m"
+        case .thirtyMinutes: return "30m"
         }
     }
     
