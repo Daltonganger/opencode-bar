@@ -382,11 +382,23 @@ final class StatusBarController: NSObject {
     private var lastHistoryFetchResult: HistoryFetchResult = .none
     private var customerId: String?
     
+    // History UI properties
+    private var historySubmenu: NSMenu!
+    private var historyMenuItem: NSMenuItem!
+    private let usagePredictor = UsagePredictor()
+    
     enum HistoryFetchResult {
         case none           // 아직 fetch 안 함
         case success        // API 성공
         case failedWithCache // API 실패, 캐시 사용
         case failedNoCache   // API 실패, 캐시도 없음
+    }
+    
+    struct HistoryUIState {
+        let history: UsageHistory?
+        let prediction: UsagePrediction?
+        let isStale: Bool
+        let hasNoData: Bool
     }
     
     private var refreshInterval: RefreshInterval {
@@ -429,6 +441,15 @@ final class StatusBarController: NSObject {
         menu.addItem(usageItem)
         
         menu.addItem(NSMenuItem.separator())
+        
+        historyMenuItem = NSMenuItem(title: "📊 Usage History", action: nil, keyEquivalent: "")
+        historySubmenu = NSMenu()
+        historyMenuItem.submenu = historySubmenu
+        let loadingItem = NSMenuItem(title: "로딩 중...", action: nil, keyEquivalent: "")
+        loadingItem.isEnabled = false
+        historySubmenu.addItem(loadingItem)
+        menu.addItem(historyMenuItem)
+        
         signInItem = NSMenuItem(title: "Sign In", action: #selector(signInClicked), keyEquivalent: "")
         signInItem.target = self
         menu.addItem(signInItem)
@@ -783,6 +804,7 @@ final class StatusBarController: NSObject {
         statusBarIconView.update(used: usage.usedRequests, limit: usage.limitRequests, cost: usage.netBilledAmount)
         usageView.update(usage: usage)
         signInItem.isHidden = true
+        updateHistorySubmenu()
     }
     
     private func updateUIForLoggedOut() {
@@ -916,9 +938,11 @@ final class StatusBarController: NSObject {
                 self.lastHistoryFetchResult = .success
                 
                 logger.info("fetchUsageHistoryNow: 완료, days.count=\(history.days.count), totalRequests=\(history.totalIncludedRequests)")
+                self.updateHistorySubmenu()
             } catch {
                 logger.error("fetchUsageHistoryNow: 실패 - \(error.localizedDescription)")
                 self.lastHistoryFetchResult = self.usageHistory != nil ? .failedWithCache : .failedNoCache
+                self.updateHistorySubmenu()
             }
         }
     }
@@ -940,6 +964,129 @@ final class StatusBarController: NSObject {
         fetchUsageHistoryNow()
         historyFetchTimer = Timer.scheduledTimer(withTimeInterval: 5 * 60, repeats: true) { [weak self] _ in
             self?.fetchUsageHistoryNow()
+        }
+    }
+    
+    private func getHistoryUIState() -> HistoryUIState {
+        guard let history = usageHistory else {
+            return HistoryUIState(history: nil, prediction: nil, isStale: false, hasNoData: true)
+        }
+        
+        let stale = isHistoryStale(history)
+        
+        var prediction: UsagePrediction? = nil
+        if let currentUsage = self.currentUsage {
+            prediction = usagePredictor.predict(history: history, currentUsage: currentUsage)
+        }
+        
+        return HistoryUIState(
+            history: history,
+            prediction: prediction,
+            isStale: stale && lastHistoryFetchResult == .failedWithCache,
+            hasNoData: false
+        )
+    }
+    
+    private func isHistoryStale(_ history: UsageHistory) -> Bool {
+        let staleThreshold: TimeInterval = 30 * 60
+        return Date().timeIntervalSince(history.fetchedAt) > staleThreshold
+    }
+    
+    private func updateHistorySubmenu() {
+        let state = getHistoryUIState()
+        historySubmenu.removeAllItems()
+        
+        if state.hasNoData {
+            let item = NSMenuItem(title: "데이터 없음", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            item.attributedTitle = NSAttributedString(
+                string: "데이터 없음",
+                attributes: [.foregroundColor: NSColor.tertiaryLabelColor]
+            )
+            historySubmenu.addItem(item)
+            return
+        }
+        
+        if let prediction = state.prediction {
+            let formatter = NumberFormatter()
+            formatter.numberStyle = .decimal
+            formatter.maximumFractionDigits = 0
+            
+            let monthlyText = "예상 월말: \(formatter.string(from: NSNumber(value: prediction.predictedMonthlyRequests)) ?? "0") requests"
+            let monthlyItem = NSMenuItem(title: monthlyText, action: nil, keyEquivalent: "")
+            monthlyItem.isEnabled = false
+            historySubmenu.addItem(monthlyItem)
+            
+            if prediction.predictedBilledAmount > 0 {
+                let costText = String(format: "예상 추가 비용: $%.2f", prediction.predictedBilledAmount)
+                let costItem = NSMenuItem(title: costText, action: nil, keyEquivalent: "")
+                costItem.isEnabled = false
+                costItem.attributedTitle = NSAttributedString(
+                    string: costText,
+                    attributes: [.foregroundColor: NSColor.systemOrange]
+                )
+                historySubmenu.addItem(costItem)
+            }
+            
+            if prediction.confidenceLevel == .low {
+                let confItem = NSMenuItem(title: "⚠️ 예측 정확도 낮음", action: nil, keyEquivalent: "")
+                confItem.isEnabled = false
+                confItem.attributedTitle = NSAttributedString(
+                    string: "⚠️ 예측 정확도 낮음",
+                    attributes: [.foregroundColor: NSColor.secondaryLabelColor]
+                )
+                historySubmenu.addItem(confItem)
+            } else if prediction.confidenceLevel == .medium {
+                let confItem = NSMenuItem(title: "📊 예측 정확도 보통", action: nil, keyEquivalent: "")
+                confItem.isEnabled = false
+                confItem.attributedTitle = NSAttributedString(
+                    string: "📊 예측 정확도 보통",
+                    attributes: [.foregroundColor: NSColor.secondaryLabelColor]
+                )
+                historySubmenu.addItem(confItem)
+            }
+            
+            historySubmenu.addItem(NSMenuItem.separator())
+        }
+        
+        if state.isStale {
+            let staleItem = NSMenuItem(title: "⏱️ 데이터가 오래됨", action: nil, keyEquivalent: "")
+            staleItem.isEnabled = false
+            staleItem.attributedTitle = NSAttributedString(
+                string: "⏱️ 데이터가 오래됨",
+                attributes: [.foregroundColor: NSColor.tertiaryLabelColor]
+            )
+            historySubmenu.addItem(staleItem)
+        }
+        
+        if let history = state.history {
+            let dateFormatter = DateFormatter()
+            dateFormatter.dateFormat = "MMM d"
+            dateFormatter.timeZone = TimeZone(identifier: "UTC")
+            
+            var utcCalendar = Calendar(identifier: .gregorian)
+            utcCalendar.timeZone = TimeZone(identifier: "UTC")!
+            let today = utcCalendar.startOfDay(for: Date())
+            
+            let numberFormatter = NumberFormatter()
+            numberFormatter.numberStyle = .decimal
+            numberFormatter.maximumFractionDigits = 0
+            
+            for day in history.recentDays {
+                let dayStart = utcCalendar.startOfDay(for: day.date)
+                let isToday = dayStart == today
+                let dateStr = dateFormatter.string(from: day.date)
+                let reqStr = numberFormatter.string(from: NSNumber(value: day.includedRequests)) ?? "0"
+                let label = isToday ? "\(dateStr) (오늘): \(reqStr) req" : "\(dateStr): \(reqStr) req"
+                
+                let item = NSMenuItem(title: label, action: nil, keyEquivalent: "")
+                item.isEnabled = false
+                item.attributedTitle = NSAttributedString(
+                    string: label,
+                    attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .regular)]
+                )
+                historySubmenu.addItem(item)
+            }
         }
     }
 }
