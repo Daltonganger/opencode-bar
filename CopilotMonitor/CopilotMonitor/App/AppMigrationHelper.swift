@@ -13,6 +13,7 @@ final class AppMigrationHelper {
     
     /// The correct app bundle name that should be used
     private let targetBundleName = "OpenCode Bar.app"
+    private let expectedBundleID = "com.copilotmonitor.CopilotMonitor"
     
     /// List of old bundle names that need migration
     private let legacyBundleNames = [
@@ -26,11 +27,7 @@ final class AppMigrationHelper {
     /// Check if migration is needed and perform it if necessary
     /// Returns true if migration was initiated (app will restart), false if no migration needed
     func checkAndMigrateIfNeeded() -> Bool {
-        guard let bundlePath = Bundle.main.bundlePath as String? else {
-            logger.error("❌ [Migration] Cannot get bundle path")
-            return false
-        }
-        
+        let bundlePath = Bundle.main.bundlePath
         let currentBundleName = (bundlePath as NSString).lastPathComponent
         
         logger.info("📦 [Migration] Current bundle: \(currentBundleName) at \(bundlePath)")
@@ -57,12 +54,40 @@ final class AppMigrationHelper {
         let fileManager = FileManager.default
         
         if fileManager.fileExists(atPath: targetPath) {
-            logger.info("🔄 [Migration] Target exists, removing old version at \(targetPath)")
-            do {
-                try fileManager.removeItem(atPath: targetPath)
-            } catch {
-                logger.error("❌ [Migration] Failed to remove existing target: \(error.localizedDescription)")
-                showMigrationError(message: "Failed to remove existing app at:\n\(targetPath)\n\nPlease remove it manually and restart.")
+            if let targetBundle = Bundle(path: targetPath),
+               let targetBundleID = targetBundle.bundleIdentifier,
+               targetBundleID == expectedBundleID {
+                let targetVersion = targetBundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+                let currentVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+                
+                if let targetVer = targetVersion, let currentVer = currentVersion,
+                   targetVer.compare(currentVer, options: .numeric) != .orderedAscending {
+                    logger.info("✅ [Migration] Target already exists and is same/newer version, launching it")
+                    NSWorkspace.shared.openApplication(
+                        at: URL(fileURLWithPath: targetPath),
+                        configuration: NSWorkspace.OpenConfiguration()
+                    ) { _, error in
+                        if let error = error {
+                            logger.error("❌ [Migration] Failed to launch target: \(error.localizedDescription)")
+                        }
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        NSApp.terminate(nil)
+                    }
+                    return true
+                }
+                
+                logger.info("🔄 [Migration] Target exists but is older version, removing it")
+                do {
+                    try fileManager.removeItem(atPath: targetPath)
+                } catch {
+                    logger.error("❌ [Migration] Failed to remove existing target: \(error.localizedDescription)")
+                    showMigrationError(message: "Failed to remove existing app at:\n\(targetPath)\n\nPlease remove it manually and restart.")
+                    return false
+                }
+            } else {
+                logger.warning("⚠️ [Migration] Target exists but has unexpected bundle ID, skipping migration")
+                showMigrationError(message: "An app already exists at:\n\(targetPath)\n\nBut it appears to be a different application. Please remove it manually if you want to proceed with migration.")
                 return false
             }
         }
@@ -78,22 +103,23 @@ final class AppMigrationHelper {
         
         logger.info("🚀 [Migration] Launching migrated app at \(targetPath)")
         
-        // Script: wait for quit → remove old bundle → launch new app
-        let cleanupScript = """
-            sleep 1
-            rm -rf "\(currentPath)"
-            open "\(targetPath)"
-            """
-        
-        let task = Process()
-        task.launchPath = "/bin/bash"
-        task.arguments = ["-c", cleanupScript]
-        
-        do {
-            try task.run()
-        } catch {
-            logger.error("❌ [Migration] Failed to launch cleanup script: \(error.localizedDescription)")
-            NSWorkspace.shared.open(URL(fileURLWithPath: targetPath))
+        DispatchQueue.global(qos: .background).asyncAfter(deadline: .now() + 1.0) {
+            let fm = FileManager.default
+            do {
+                try fm.removeItem(atPath: currentPath)
+                logger.info("🗑️ [Migration] Removed old bundle at \(currentPath)")
+            } catch {
+                logger.error("❌ [Migration] Failed to remove old bundle: \(error.localizedDescription)")
+            }
+            
+            NSWorkspace.shared.openApplication(
+                at: URL(fileURLWithPath: targetPath),
+                configuration: NSWorkspace.OpenConfiguration()
+            ) { _, error in
+                if let error = error {
+                    logger.error("❌ [Migration] Failed to launch new app: \(error.localizedDescription)")
+                }
+            }
         }
         
         logger.info("👋 [Migration] Quitting old app instance")
@@ -118,8 +144,7 @@ final class AppMigrationHelper {
     /// Called by the newly launched app to clean up after migration
     /// Checks if there's an old bundle that should be removed
     func cleanupLegacyBundlesIfNeeded() {
-        guard let bundlePath = Bundle.main.bundlePath as String? else { return }
-        
+        let bundlePath = Bundle.main.bundlePath
         let currentBundleName = (bundlePath as NSString).lastPathComponent
         guard currentBundleName == targetBundleName else { return }
         
@@ -128,8 +153,12 @@ final class AppMigrationHelper {
         
         for legacyName in legacyBundleNames {
             let legacyPath = (parentDirectory as NSString).appendingPathComponent(legacyName)
-            if fileManager.fileExists(atPath: legacyPath) {
-                logger.info("🧹 [Migration] Found legacy bundle to clean up: \(legacyPath)")
+            guard fileManager.fileExists(atPath: legacyPath) else { continue }
+            
+            if let legacyBundle = Bundle(path: legacyPath),
+               let bundleID = legacyBundle.bundleIdentifier,
+               bundleID == expectedBundleID {
+                logger.info("🧹 [Migration] Found validated legacy bundle to clean up: \(legacyName)")
                 
                 do {
                     try fileManager.removeItem(atPath: legacyPath)
@@ -137,6 +166,8 @@ final class AppMigrationHelper {
                 } catch {
                     logger.warning("⚠️ [Migration] Could not remove legacy bundle: \(error.localizedDescription)")
                 }
+            } else {
+                logger.warning("⚠️ [Migration] Skipping \(legacyName) - bundle ID mismatch or unreadable")
             }
         }
     }

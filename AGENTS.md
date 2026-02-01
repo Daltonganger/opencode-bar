@@ -374,4 +374,4 @@ func buildProviderSubmenu() -> [NSMenuItem] {
         - Pattern: Hybrid approach (fetch recent + cache older) reduces API calls by 71%+
         - Optimization: Ensure cache validation uses UTC calendar to match cache storage format
 
-              <!-- opencode:reflection:end -->
+<!-- opencode:reflection:end -->
