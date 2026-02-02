@@ -1,21 +1,53 @@
 import AppKit
 import SwiftUI
 import ServiceManagement
+import WebKit
 import os.log
 
 private let logger = Logger(subsystem: "com.opencodeproviders", category: "StatusBarController")
+
+enum UsageFetcherError: LocalizedError {
+    case noCustomerId
+    case noUsageData
+    case invalidJSResult
+    case parsingFailed(String)
+    case networkError(Error)
+
+    var errorDescription: String? {
+        switch self {
+        case .noCustomerId:
+            return "Customer ID not found"
+        case .noUsageData:
+            return "Usage data not found"
+        case .invalidJSResult:
+            return "Invalid JS result"
+        case .parsingFailed(let detail):
+            return "Parsing failed: \(detail)"
+        case .networkError(let error):
+            return "Network error: \(error.localizedDescription)"
+        }
+    }
+}
 
 @MainActor
 final class StatusBarController: NSObject {
     private var statusItem: NSStatusItem?
     private var statusBarIconView: StatusBarIconView?
     private var menu: NSMenu!
+    private var signInItem: NSMenuItem!
+    private var resetLoginItem: NSMenuItem!
     private var launchAtLoginItem: NSMenuItem!
+    private var installCLIItem: NSMenuItem!
     private var refreshIntervalMenu: NSMenu!
     private var refreshTimer: Timer?
 
+    private var currentUsage: CopilotUsage?
     private var lastFetchTime: Date?
     private var isFetching = false
+
+    // History fetch properties
+    private var historyFetchTimer: Timer?
+    private var customerId: String?
 
     // History properties (for Copilot provider via CopilotHistoryService)
     private var usageHistory: UsageHistory?
@@ -176,6 +208,12 @@ final class StatusBarController: NSObject {
         launchAtLoginItem.target = self
         updateLaunchAtLoginState()
         menu.addItem(launchAtLoginItem)
+
+        installCLIItem = NSMenuItem(title: "Install CLI (opencodebar)", action: #selector(installCLIClicked), keyEquivalent: "")
+        installCLIItem.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: "Install CLI")
+        installCLIItem.target = self
+        menu.addItem(installCLIItem)
+        updateCLIInstallState()
 
         menu.addItem(NSMenuItem.separator())
 
@@ -370,11 +408,31 @@ final class StatusBarController: NSObject {
            logger.debug("🟢 [StatusBarController] filteredResults: \(filteredNames)")
 
            self.providerResults = filteredResults
-           
-           let filteredErrors = fetchResult.errors.filter { identifier, _ in
-               isProviderEnabled(identifier)
-           }
-           self.lastProviderErrors = filteredErrors
+            
+            // Extract CopilotUsage from provider result if available
+            if let copilotResult = filteredResults[.copilot],
+               let details = copilotResult.details,
+               let usedRequests = details.copilotUsedRequests,
+               let limitRequests = details.copilotLimitRequests {
+                self.currentUsage = CopilotUsage(
+                    netBilledAmount: details.copilotOverageCost ?? 0.0,
+                    netQuantity: details.copilotOverageRequests ?? 0.0,
+                    discountQuantity: Double(usedRequests),
+                    userPremiumRequestEntitlement: limitRequests,
+                    filteredUserPremiumRequestEntitlement: 0,
+                    copilotPlan: details.planType,
+                    quotaResetDateUTC: details.copilotQuotaResetDateUTC
+                )
+                debugLog("🟢 fetchMultiProviderData: currentUsage set from Copilot provider - used: \(usedRequests), limit: \(limitRequests)")
+                logger.info("🟢 [StatusBarController] currentUsage set from Copilot provider")
+            } else {
+                debugLog("🟡 fetchMultiProviderData: No Copilot data available, currentUsage not set")
+            }
+            
+            let filteredErrors = fetchResult.errors.filter { identifier, _ in
+                isProviderEnabled(identifier)
+            }
+            self.lastProviderErrors = filteredErrors
 
            for identifier in filteredResults.keys {
                loadingProviders.remove(identifier)
@@ -403,8 +461,12 @@ final class StatusBarController: NSObject {
            debugLog("🟢 fetchMultiProviderData: completed")
        }
 
-    private func calculatePayAsYouGoTotal(providerResults: [ProviderIdentifier: ProviderResult]) -> Double {
+    private func calculatePayAsYouGoTotal(providerResults: [ProviderIdentifier: ProviderResult], copilotUsage: CopilotUsage?) -> Double {
         var total = 0.0
+
+        if let copilot = copilotUsage {
+            total += copilot.netBilledAmount
+        }
 
         for (_, result) in providerResults {
             if case .payAsYouGo(_, let cost, _) = result.usage, let cost = cost {
@@ -413,6 +475,12 @@ final class StatusBarController: NSObject {
         }
 
         return total
+    }
+
+    private func calculateTotalWithSubscriptions(providerResults: [ProviderIdentifier: ProviderResult], copilotUsage: CopilotUsage?) -> Double {
+        let payAsYouGo = calculatePayAsYouGoTotal(providerResults: providerResults, copilotUsage: copilotUsage)
+        let subscriptions = SubscriptionSettingsManager.shared.getTotalMonthlySubscriptionCost()
+        return payAsYouGo + subscriptions
     }
 
       private func updateMultiProviderMenu() {
@@ -455,9 +523,11 @@ final class StatusBarController: NSObject {
          menu.insertItem(separator1, at: insertIndex)
          insertIndex += 1
 
-          let total = calculatePayAsYouGoTotal(providerResults: providerResults)
+          let payAsYouGoTotal = calculatePayAsYouGoTotal(providerResults: providerResults, copilotUsage: currentUsage)
+          let subscriptionTotal = SubscriptionSettingsManager.shared.getTotalMonthlySubscriptionCost()
+          
           let payAsYouGoHeader = NSMenuItem()
-          payAsYouGoHeader.view = createHeaderView(title: String(format: "Pay-as-you-go: $%.2f", total))
+          payAsYouGoHeader.view = createHeaderView(title: String(format: "Pay-as-you-go: $%.2f", payAsYouGoTotal))
           payAsYouGoHeader.tag = 999
           menu.insertItem(payAsYouGoHeader, at: insertIndex)
           insertIndex += 1
@@ -584,14 +654,112 @@ final class StatusBarController: NSObject {
         insertIndex += 1
 
          let quotaHeader = NSMenuItem()
-         quotaHeader.view = createHeaderView(title: "Quota Status")
+         let quotaTitle = subscriptionTotal > 0
+             ? String(format: "Quota Status: $%.0f/m", subscriptionTotal)
+             : "Quota Status"
+         quotaHeader.view = createHeaderView(title: quotaTitle)
          quotaHeader.tag = 999
          menu.insertItem(quotaHeader, at: insertIndex)
          insertIndex += 1
 
          var hasQuota = false
 
-           let quotaOrder: [ProviderIdentifier] = [.copilot, .claude, .kimi, .codex, .antigravity]
+          if let copilotUsage = currentUsage {
+              hasQuota = true
+              let limit = copilotUsage.userPremiumRequestEntitlement
+              let used = copilotUsage.usedRequests
+              let remaining = limit - used
+              let percentage = limit > 0 ? (Double(remaining) / Double(limit)) * 100 : 0
+
+              var titleParts = ["Copilot"]
+              if let planName = copilotUsage.planDisplayName {
+                  titleParts.append("(\(planName))")
+              }
+              titleParts.append(String(format: "%.0f%% remaining", percentage))
+
+              let quotaItem = NSMenuItem(
+                  title: titleParts.joined(separator: " "),
+                  action: nil,
+                  keyEquivalent: ""
+              )
+              quotaItem.image = iconForProvider(.copilot)
+              if percentage < 20 {
+                  quotaItem.image = tintedImage(iconForProvider(.copilot), color: .systemRed)
+              }
+              quotaItem.tag = 999
+
+              let submenu = NSMenu()
+
+              let filledBlocks = Int((Double(used) / Double(max(limit, 1))) * 10)
+              let emptyBlocks = 10 - filledBlocks
+              let progressBar = String(repeating: "═", count: filledBlocks) + String(repeating: "░", count: emptyBlocks)
+              let progressItem = NSMenuItem()
+              progressItem.view = createDisabledLabelView(text: "[\(progressBar)] \(used)/\(limit)")
+              submenu.addItem(progressItem)
+
+              let usagePercent = limit > 0 ? (Double(used) / Double(limit)) * 100 : 0
+              let usedItem = NSMenuItem()
+              usedItem.view = createDisabledLabelView(text: String(format: "Monthly Usage: %.0f%%", usagePercent))
+              submenu.addItem(usedItem)
+
+              if let resetDate = copilotUsage.quotaResetDateUTC {
+                  let formatter = DateFormatter()
+                  formatter.dateFormat = "yyyy-MM-dd HH:mm"
+                  formatter.timeZone = TimeZone(identifier: "UTC") ?? TimeZone(secondsFromGMT: 0)!
+                  let resetItem = NSMenuItem()
+                  resetItem.view = createDisabledLabelView(text: "Resets: \(formatter.string(from: resetDate)) UTC", indent: 18)
+                  submenu.addItem(resetItem)
+
+                  let paceInfo = calculateMonthlyPace(usagePercent: usagePercent, resetDate: resetDate)
+                  let paceItem = NSMenuItem()
+                  paceItem.view = createPaceView(paceInfo: paceInfo)
+                  submenu.addItem(paceItem)
+              }
+
+              submenu.addItem(NSMenuItem.separator())
+
+              if let planName = copilotUsage.planDisplayName {
+                  let planItem = NSMenuItem()
+                  planItem.view = createDisabledLabelView(
+                      text: "Plan: \(planName)",
+                      icon: NSImage(systemSymbolName: "crown", accessibilityDescription: "Plan")
+                  )
+                  submenu.addItem(planItem)
+              }
+
+              let freeItem = NSMenuItem()
+              freeItem.view = createDisabledLabelView(text: "Quota Limit: \(limit)")
+              submenu.addItem(freeItem)
+
+              submenu.addItem(NSMenuItem.separator())
+
+              if let email = providerResults[.copilot]?.details?.email {
+                  let emailItem = NSMenuItem()
+                  emailItem.view = createDisabledLabelView(
+                      text: "Email: \(email)",
+                      icon: NSImage(systemSymbolName: "person.circle", accessibilityDescription: "User Email"),
+                      multiline: false
+                  )
+                  submenu.addItem(emailItem)
+              }
+
+              let authItem = NSMenuItem()
+              authItem.view = createDisabledLabelView(
+                  text: "Token From: Browser Cookies (Chrome/Brave/Arc/Edge)",
+                  icon: NSImage(systemSymbolName: "key", accessibilityDescription: "Auth Source"),
+                  multiline: true
+              )
+              submenu.addItem(authItem)
+
+              addSubscriptionItems(to: submenu, provider: .copilot)
+
+              quotaItem.submenu = submenu
+
+              menu.insertItem(quotaItem, at: insertIndex)
+              insertIndex += 1
+          }
+
+           let quotaOrder: [ProviderIdentifier] = [.claude, .kimi, .codex, .antigravity]
             for identifier in quotaOrder {
                 guard isProviderEnabled(identifier) else { continue }
 
@@ -678,9 +846,9 @@ final class StatusBarController: NSObject {
         separator3.tag = 999
         menu.insertItem(separator3, at: insertIndex)
 
-        let totalCost = calculatePayAsYouGoTotal(providerResults: providerResults)
+        let totalCost = calculateTotalWithSubscriptions(providerResults: providerResults, copilotUsage: currentUsage)
         statusBarIconView?.update(cost: totalCost)
-        debugLog("updateMultiProviderMenu: completed successfully")
+        debugLog("updateMultiProviderMenu: completed successfully, totalCost=$\(totalCost)")
         logMenuStructure()
     }
 
@@ -818,6 +986,58 @@ final class StatusBarController: NSObject {
          return tinted
      }
 
+    // MARK: - Subscription Actions
+
+    @objc func subscriptionPlanSelected(_ sender: NSMenuItem) {
+        guard let action = sender.representedObject as? SubscriptionMenuAction else { return }
+
+        SubscriptionSettingsManager.shared.setPlan(action.plan, forKey: action.subscriptionKey)
+        menu.cancelTracking()
+        updateMultiProviderMenu()
+    }
+
+    @objc func customSubscriptionSelected(_ sender: NSMenuItem) {
+        guard let subscriptionKey = sender.representedObject as? String else { return }
+
+        var shouldPrompt = true
+        while shouldPrompt {
+            let alert = NSAlert()
+            alert.messageText = "Custom Subscription Cost"
+            alert.informativeText = "Enter the monthly subscription cost:"
+            alert.addButton(withTitle: "OK")
+            alert.addButton(withTitle: "Cancel")
+
+            let inputField = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+            if case .custom(let currentCost) = SubscriptionSettingsManager.shared.getPlan(forKey: subscriptionKey) {
+                inputField.stringValue = String(format: "%.0f", currentCost)
+            } else {
+                inputField.stringValue = ""
+            }
+            inputField.placeholderString = "Enter amount in USD"
+            alert.accessoryView = inputField
+
+            NSApp.activate(ignoringOtherApps: true)
+
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn {
+                if let cost = Double(inputField.stringValue), cost >= 0 {
+                    SubscriptionSettingsManager.shared.setPlan(.custom(cost), forKey: subscriptionKey)
+                    menu.cancelTracking()
+                    updateMultiProviderMenu()
+                    shouldPrompt = false
+                } else {
+                    let errorAlert = NSAlert()
+                    errorAlert.messageText = "Invalid Amount"
+                    errorAlert.informativeText = "Please enter a valid non-negative number."
+                    errorAlert.addButton(withTitle: "OK")
+                    errorAlert.runModal()
+                }
+            } else {
+                shouldPrompt = false
+            }
+        }
+    }
+
      // MARK: - Custom Menu Item Views
 
     func createHeaderView(title: String) -> NSView {
@@ -916,6 +1136,41 @@ final class StatusBarController: NSObject {
         }
 
         return view
+    }
+
+    private func evalJSONString(_ js: String, in webView: WKWebView) async throws -> String {
+        let result = try await webView.callAsyncJavaScript(js, arguments: [:], in: nil, contentWorld: .defaultClient)
+
+        if let json = result as? String {
+            return json
+        } else if let dict = result as? [String: Any],
+                  let data = try? JSONSerialization.data(withJSONObject: dict),
+                  let json = String(data: data, encoding: .utf8) {
+            return json
+        } else {
+            throw UsageFetcherError.invalidJSResult
+        }
+    }
+
+      private func updateUIForSuccess(usage: CopilotUsage) {
+          let totalCost = calculateTotalWithSubscriptions(providerResults: providerResults, copilotUsage: usage)
+          statusBarIconView?.update(cost: totalCost)
+          signInItem.isHidden = true
+          updateHistorySubmenu()
+          updateMultiProviderMenu()
+      }
+
+    private func updateUIForLoggedOut() {
+        statusBarIconView?.showError()
+        signInItem.isHidden = false
+    }
+
+    private func handleFetchError(_ error: Error) {
+        statusBarIconView?.showError()
+    }
+
+    @objc private func signInClicked() {
+        NotificationCenter.default.post(name: Notification.Name("sessionExpired"), object: nil)
     }
 
     @objc private func refreshClicked() {
@@ -1093,6 +1348,88 @@ final class StatusBarController: NSObject {
 
     private func updateLaunchAtLoginState() {
         launchAtLoginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
+    }
+
+    @objc private func installCLIClicked() {
+        logger.info("⌨️ [Keyboard] Install CLI triggered")
+        debugLog("⌨️ installCLIClicked: Install CLI menu item activated")
+        
+        // Resolve CLI binary path via bundle URL (Contents/MacOS/opencodebar-cli)
+        let cliURL = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/opencodebar-cli")
+        let cliPath = cliURL.path
+        
+        guard FileManager.default.fileExists(atPath: cliPath) else {
+            logger.error("CLI binary not found in app bundle at \(cliPath)")
+            debugLog("❌ CLI binary not found at expected path in app bundle")
+            showAlert(title: "CLI Not Found", message: "CLI binary not found in app bundle. Please reinstall the app.")
+            return
+        }
+        
+        debugLog("✅ CLI binary found at: \(cliPath)")
+        
+        // Escape cliPath for safe inclusion in AppleScript string literal
+        let escapedCliPath = cliPath.replacingOccurrences(of: "\"", with: "\\\"")
+        
+        // Use AppleScript's 'quoted form of' to safely escape the path for the shell command and prevent command injection
+        let script = """
+        set cliPath to "\(escapedCliPath)"
+        do shell script "mkdir -p /usr/local/bin && cp " & quoted form of cliPath & " /usr/local/bin/opencodebar && chmod +x /usr/local/bin/opencodebar" with administrator privileges
+        """
+        
+        debugLog("🔐 Executing AppleScript for privileged installation")
+        var error: NSDictionary?
+        if let scriptObject = NSAppleScript(source: script) {
+            scriptObject.executeAndReturnError(&error)
+            
+            if let error = error {
+                logger.error("CLI installation failed: \(error.description)")
+                debugLog("❌ Installation failed: \(error.description)")
+                showAlert(title: "Installation Failed", message: "Failed to install CLI: \(error.description)")
+            } else {
+                logger.info("CLI installed successfully to /usr/local/bin/opencodebar")
+                debugLog("✅ CLI installed successfully")
+                showAlert(title: "Success", message: "CLI installed to /usr/local/bin/opencodebar\n\nYou can now use 'opencodebar' command in Terminal.")
+                updateCLIInstallState()
+            }
+        } else {
+            logger.error("Failed to create AppleScript object")
+            debugLog("❌ Failed to create AppleScript object")
+            showAlert(title: "Installation Failed", message: "Failed to create installation script.")
+        }
+    }
+
+    private func updateCLIInstallState() {
+        let installed = FileManager.default.fileExists(atPath: "/usr/local/bin/opencodebar")
+        
+        if installed {
+            installCLIItem.title = "CLI Installed (opencodebar)"
+            installCLIItem.state = .on
+            installCLIItem.isEnabled = false
+            debugLog("✅ CLI is installed at /usr/local/bin/opencodebar")
+        } else {
+            installCLIItem.title = "Install CLI (opencodebar)"
+            installCLIItem.state = .off
+            installCLIItem.isEnabled = true
+            debugLog("ℹ️ CLI is not installed")
+        }
+    }
+
+    private func showAlert(title: String, message: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        alert.alertStyle = .informational
+        
+        alert.runModal()
+    }
+
+    private func saveCache(usage: CopilotUsage) {
+        if let data = try? JSONEncoder().encode(CachedUsage(usage: usage, timestamp: Date())) {
+            UserDefaults.standard.set(data, forKey: "copilot.usage.cache")
+        }
     }
 
     private func clearCaches() {
