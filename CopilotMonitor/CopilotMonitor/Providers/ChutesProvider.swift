@@ -78,18 +78,18 @@ final class ChutesProvider: ProviderProtocol {
             throw ProviderError.authenticationFailed("Chutes API key not available")
         }
 
-        let userProfile = try await fetchUserProfile(apiKey: apiKey)
-
-        async let quotasTask = fetchQuotas(apiKey: apiKey)
-        async let usageTask = fetchQuotaUsage(apiKey: apiKey)
-
-        let quotaItems = try await quotasTask
-        let usage = try await usageTask
+        async let userProfileTask = fetchUserProfile(apiKey: apiKey)
+        let quotaItems = try await fetchQuotas(apiKey: apiKey)
 
         guard let quotaItem = quotaItems.first(where: { $0.isDefault }) ?? quotaItems.first else {
             logger.error("No quota information found in Chutes response")
             throw ProviderError.decodingError("No quota data available")
         }
+
+        logger.debug("Using Chutes quota_usage for chute_id: \(quotaItem.chuteId, privacy: .public)")
+
+        let usage = try await fetchQuotaUsage(apiKey: apiKey, chuteId: quotaItem.chuteId)
+        let userProfile = try await userProfileTask
 
         let quota = quotaItem.quota
         let used = usage.used
@@ -163,9 +163,10 @@ final class ChutesProvider: ProviderProtocol {
         }
     }
 
-    /// Fetches usage from /users/me/quota_usage/*
-    private func fetchQuotaUsage(apiKey: String) async throws -> ChutesQuotaUsage {
-        guard let url = URL(string: "https://api.chutes.ai/users/me/quota_usage/A") else {
+    /// Fetches usage from /users/me/quota_usage/{chute_id}
+    private func fetchQuotaUsage(apiKey: String, chuteId: String) async throws -> ChutesQuotaUsage {
+        let encodedChuteId = chuteId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? chuteId
+        guard let url = URL(string: "https://api.chutes.ai/users/me/quota_usage/\(encodedChuteId)") else {
             throw ProviderError.networkError("Invalid quota_usage URL")
         }
 
