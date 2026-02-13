@@ -113,6 +113,25 @@ final class NanoGptProvider: ProviderProtocol {
     let identifier: ProviderIdentifier = .nanoGpt
     let type: ProviderType = .quotaBased
 
+    private static let formatterWithFractional: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static let formatterWithoutFractional: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+
+    private static let displayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm z"
+        formatter.timeZone = TimeZone.current
+        return formatter
+    }()
+
     private let tokenManager: TokenManager
     private let session: URLSession
 
@@ -264,19 +283,10 @@ final class NanoGptProvider: ProviderProtocol {
     private func formatISO8601(_ value: String?) -> String? {
         guard let value, !value.isEmpty else { return nil }
 
-        let formatterWithFractional = ISO8601DateFormatter()
-        formatterWithFractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-
-        let formatterWithoutFractional = ISO8601DateFormatter()
-        formatterWithoutFractional.formatOptions = [.withInternetDateTime]
-
-        let date = formatterWithFractional.date(from: value) ?? formatterWithoutFractional.date(from: value)
+        let date = Self.formatterWithFractional.date(from: value) ?? Self.formatterWithoutFractional.date(from: value)
         guard let date else { return nil }
 
-        let displayFormatter = DateFormatter()
-        displayFormatter.dateFormat = "yyyy-MM-dd HH:mm z"
-        displayFormatter.timeZone = TimeZone.current
-        return displayFormatter.string(from: date)
+        return Self.displayFormatter.string(from: date)
     }
 
     private func parseDouble(_ value: String?) -> Double? {
