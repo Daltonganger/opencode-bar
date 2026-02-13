@@ -77,6 +77,22 @@ curl -s "https://chatgpt.com/backend-api/wham/usage" \
       "reset_after_seconds": 265266
     }
   },
+  "additional_rate_limits": [
+    {
+      "limit_name": "GPT-5.3-Codex-Spark",
+      "metered_feature": "codex_bengalfox",
+      "rate_limit": {
+        "primary_window": {
+          "used_percent": 16,
+          "reset_after_seconds": 16711
+        },
+        "secondary_window": {
+          "used_percent": 5,
+          "reset_after_seconds": 603511
+        }
+      }
+    }
+  ],
   "credits": { "balance": "0", "unlimited": false }
 }
 ```
@@ -85,6 +101,9 @@ curl -s "https://chatgpt.com/backend-api/wham/usage" \
 |-------|-------------|
 | `primary_window.used_percent` | Primary rate limit utilization (%) |
 | `secondary_window.used_percent` | Secondary rate limit utilization (%) |
+| `additional_rate_limits[].limit_name` | Additional quota limit display name (for example, Spark) |
+| `additional_rate_limits[].rate_limit.primary_window.used_percent` | Additional limit primary window utilization (%) |
+| `additional_rate_limits[].rate_limit.secondary_window.used_percent` | Additional limit secondary window utilization (%) |
 
 ---
 
@@ -354,6 +373,7 @@ Test scripts are located in the `scripts/` folder:
 | `query-codex.sh` | Codex (OpenAI) |
 | `query-copilot.sh` | GitHub Copilot |
 | `query-gemini-cli.sh` | Antigravity - Gemini CLI quota |
+| `query-gemini-oauth-creds.sh` | Gemini CLI oauth_creds identity/token inspection |
 | `query-antigravity-local.sh` | Antigravity - Local quota |
 | `query-all.sh` | All providers |
 

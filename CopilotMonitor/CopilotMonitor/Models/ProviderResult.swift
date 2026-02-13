@@ -27,13 +27,37 @@ struct ProviderAccountResult {
 struct GeminiAccountQuota: Codable {
     let accountIndex: Int
     let email: String
+    let accountId: String?
     let remainingPercentage: Double
     let modelBreakdown: [String: Double]
     let authSource: String
+    let authUsageSummary: String?
     /// Earliest reset time among all model quotas for this account
     let earliestReset: Date?
     /// Reset time for each model (key: modelId, value: reset date)
     let modelResetTimes: [String: Date]
+
+    init(
+        accountIndex: Int,
+        email: String,
+        accountId: String? = nil,
+        remainingPercentage: Double,
+        modelBreakdown: [String: Double],
+        authSource: String,
+        authUsageSummary: String? = nil,
+        earliestReset: Date?,
+        modelResetTimes: [String: Date]
+    ) {
+        self.accountIndex = accountIndex
+        self.email = email
+        self.accountId = accountId
+        self.remainingPercentage = remainingPercentage
+        self.modelBreakdown = modelBreakdown
+        self.authSource = authSource
+        self.authUsageSummary = authUsageSummary
+        self.earliestReset = earliestReset
+        self.modelResetTimes = modelResetTimes
+    }
 }
 
 struct DetailedUsage {
@@ -68,6 +92,11 @@ struct DetailedUsage {
     let secondaryUsage: Double?
     let secondaryReset: Date?
     let primaryReset: Date?
+    let sparkUsage: Double?
+    let sparkReset: Date?
+    let sparkSecondaryUsage: Double?
+    let sparkSecondaryReset: Date?
+    let sparkWindowLabel: String?
 
     // Codex/Antigravity plan info
     let creditsBalance: Double?
@@ -85,8 +114,8 @@ struct DetailedUsage {
     let messages: Int?
     let avgCostPerDay: Double?
 
-    // Antigravity user email
-    let email: String?
+    // var: mutated during candidate merging for email fallback
+    var email: String?
 
     // History and cost tracking
     let dailyHistory: [DailyUsage]?
@@ -95,7 +124,9 @@ struct DetailedUsage {
     let creditsTotal: Double?
 
     // Authentication source info (displayed as "Token From:" or "Cookies From:")
-    let authSource: String?
+    var authSource: String?
+    // Human-friendly source labels (displayed as "Using in:")
+    var authUsageSummary: String?
 
     // Multiple Gemini accounts support
     let geminiAccounts: [GeminiAccountQuota]?
@@ -144,6 +175,11 @@ struct DetailedUsage {
         secondaryUsage: Double? = nil,
         secondaryReset: Date? = nil,
         primaryReset: Date? = nil,
+        sparkUsage: Double? = nil,
+        sparkReset: Date? = nil,
+        sparkSecondaryUsage: Double? = nil,
+        sparkSecondaryReset: Date? = nil,
+        sparkWindowLabel: String? = nil,
         creditsBalance: Double? = nil,
         planType: String? = nil,
         extraUsageEnabled: Bool? = nil,
@@ -159,6 +195,7 @@ struct DetailedUsage {
         creditsRemaining: Double? = nil,
         creditsTotal: Double? = nil,
         authSource: String? = nil,
+        authUsageSummary: String? = nil,
         geminiAccounts: [GeminiAccountQuota]? = nil,
         tokenUsagePercent: Double? = nil,
         tokenUsageReset: Date? = nil,
@@ -200,6 +237,11 @@ struct DetailedUsage {
         self.secondaryUsage = secondaryUsage
         self.secondaryReset = secondaryReset
         self.primaryReset = primaryReset
+        self.sparkUsage = sparkUsage
+        self.sparkReset = sparkReset
+        self.sparkSecondaryUsage = sparkSecondaryUsage
+        self.sparkSecondaryReset = sparkSecondaryReset
+        self.sparkWindowLabel = sparkWindowLabel
         self.creditsBalance = creditsBalance
         self.planType = planType
         self.extraUsageEnabled = extraUsageEnabled
@@ -215,6 +257,7 @@ struct DetailedUsage {
         self.creditsRemaining = creditsRemaining
         self.creditsTotal = creditsTotal
         self.authSource = authSource
+        self.authUsageSummary = authUsageSummary
         self.geminiAccounts = geminiAccounts
         self.tokenUsagePercent = tokenUsagePercent
         self.tokenUsageReset = tokenUsageReset
@@ -244,11 +287,12 @@ extension DetailedUsage: Codable {
         case fiveHourUsage, fiveHourReset, sevenDayUsage, sevenDayReset
         case sonnetUsage, sonnetReset, opusUsage, opusReset, modelBreakdown, modelResetTimes
         case secondaryUsage, secondaryReset, primaryReset
+        case sparkUsage, sparkReset, sparkSecondaryUsage, sparkSecondaryReset, sparkWindowLabel
         case creditsBalance, planType, extraUsageEnabled
         case extraUsageMonthlyLimitUSD, extraUsageUsedUSD, extraUsageUtilizationPercent
         case sessions, messages, avgCostPerDay, email
         case dailyHistory, monthlyCost, creditsRemaining, creditsTotal
-        case authSource, geminiAccounts
+        case authSource, authUsageSummary, geminiAccounts
         case tokenUsagePercent, tokenUsageReset, tokenUsageUsed, tokenUsageTotal
         case mcpUsagePercent, mcpUsageReset, mcpUsageUsed, mcpUsageTotal
         case modelUsageTokens, modelUsageCalls
@@ -279,6 +323,11 @@ extension DetailedUsage: Codable {
         secondaryUsage = try container.decodeIfPresent(Double.self, forKey: .secondaryUsage)
         secondaryReset = try container.decodeIfPresent(Date.self, forKey: .secondaryReset)
         primaryReset = try container.decodeIfPresent(Date.self, forKey: .primaryReset)
+        sparkUsage = try container.decodeIfPresent(Double.self, forKey: .sparkUsage)
+        sparkReset = try container.decodeIfPresent(Date.self, forKey: .sparkReset)
+        sparkSecondaryUsage = try container.decodeIfPresent(Double.self, forKey: .sparkSecondaryUsage)
+        sparkSecondaryReset = try container.decodeIfPresent(Date.self, forKey: .sparkSecondaryReset)
+        sparkWindowLabel = try container.decodeIfPresent(String.self, forKey: .sparkWindowLabel)
         creditsBalance = try container.decodeIfPresent(Double.self, forKey: .creditsBalance)
         planType = try container.decodeIfPresent(String.self, forKey: .planType)
         extraUsageEnabled = try container.decodeIfPresent(Bool.self, forKey: .extraUsageEnabled)
@@ -294,6 +343,7 @@ extension DetailedUsage: Codable {
         creditsRemaining = try container.decodeIfPresent(Double.self, forKey: .creditsRemaining)
         creditsTotal = try container.decodeIfPresent(Double.self, forKey: .creditsTotal)
         authSource = try container.decodeIfPresent(String.self, forKey: .authSource)
+        authUsageSummary = try container.decodeIfPresent(String.self, forKey: .authUsageSummary)
         geminiAccounts = try container.decodeIfPresent([GeminiAccountQuota].self, forKey: .geminiAccounts)
         tokenUsagePercent = try container.decodeIfPresent(Double.self, forKey: .tokenUsagePercent)
         tokenUsageReset = try container.decodeIfPresent(Date.self, forKey: .tokenUsageReset)
@@ -338,6 +388,11 @@ extension DetailedUsage: Codable {
         try container.encodeIfPresent(secondaryUsage, forKey: .secondaryUsage)
         try container.encodeIfPresent(secondaryReset, forKey: .secondaryReset)
         try container.encodeIfPresent(primaryReset, forKey: .primaryReset)
+        try container.encodeIfPresent(sparkUsage, forKey: .sparkUsage)
+        try container.encodeIfPresent(sparkReset, forKey: .sparkReset)
+        try container.encodeIfPresent(sparkSecondaryUsage, forKey: .sparkSecondaryUsage)
+        try container.encodeIfPresent(sparkSecondaryReset, forKey: .sparkSecondaryReset)
+        try container.encodeIfPresent(sparkWindowLabel, forKey: .sparkWindowLabel)
         try container.encodeIfPresent(creditsBalance, forKey: .creditsBalance)
         try container.encodeIfPresent(planType, forKey: .planType)
         try container.encodeIfPresent(extraUsageEnabled, forKey: .extraUsageEnabled)
@@ -353,6 +408,7 @@ extension DetailedUsage: Codable {
         try container.encodeIfPresent(creditsRemaining, forKey: .creditsRemaining)
         try container.encodeIfPresent(creditsTotal, forKey: .creditsTotal)
         try container.encodeIfPresent(authSource, forKey: .authSource)
+        try container.encodeIfPresent(authUsageSummary, forKey: .authUsageSummary)
         try container.encodeIfPresent(geminiAccounts, forKey: .geminiAccounts)
         try container.encodeIfPresent(tokenUsagePercent, forKey: .tokenUsagePercent)
         try container.encodeIfPresent(tokenUsageReset, forKey: .tokenUsageReset)
@@ -381,23 +437,32 @@ struct CandidateDedupe {
         _ candidates: [T],
         accountId: (T) -> String?,
         isSameUsage: (T, T) -> Bool,
-        priority: (T) -> Int
+        priority: (T) -> Int,
+        mergeCandidates: ((T, T) -> T)? = nil
     ) -> [T] {
         var results: [T] = []
 
         for candidate in candidates {
             if let candidateId = accountId(candidate),
                let index = results.firstIndex(where: { accountId($0) == candidateId }) {
-                if priority(candidate) > priority(results[index]) {
-                    results[index] = candidate
-                }
+                let existing = results[index]
+                results[index] = preferredCandidate(
+                    incoming: candidate,
+                    existing: existing,
+                    priority: priority,
+                    mergeCandidates: mergeCandidates
+                )
                 continue
             }
 
             if let index = results.firstIndex(where: { isSameUsage($0, candidate) }) {
-                if priority(candidate) > priority(results[index]) {
-                    results[index] = candidate
-                }
+                let existing = results[index]
+                results[index] = preferredCandidate(
+                    incoming: candidate,
+                    existing: existing,
+                    priority: priority,
+                    mergeCandidates: mergeCandidates
+                )
                 continue
             }
 
@@ -405,6 +470,31 @@ struct CandidateDedupe {
         }
 
         return results
+    }
+
+    private static func preferredCandidate<T>(
+        incoming: T,
+        existing: T,
+        priority: (T) -> Int,
+        mergeCandidates: ((T, T) -> T)?
+    ) -> T {
+        let incomingPriority = priority(incoming)
+        let existingPriority = priority(existing)
+
+        let preferred: T
+        let secondary: T
+        if incomingPriority > existingPriority {
+            preferred = incoming
+            secondary = existing
+        } else {
+            preferred = existing
+            secondary = incoming
+        }
+
+        guard let mergeCandidates else {
+            return preferred
+        }
+        return mergeCandidates(preferred, secondary)
     }
 }
 
@@ -419,6 +509,7 @@ extension DetailedUsage {
             || opusUsage != nil || opusReset != nil
             || modelBreakdown != nil || modelResetTimes != nil
             || secondaryUsage != nil || secondaryReset != nil || primaryReset != nil
+            || sparkUsage != nil || sparkReset != nil || sparkSecondaryUsage != nil || sparkSecondaryReset != nil || sparkWindowLabel != nil
             || creditsBalance != nil || planType != nil
             || extraUsageEnabled != nil
             || extraUsageMonthlyLimitUSD != nil || extraUsageUsedUSD != nil || extraUsageUtilizationPercent != nil
@@ -426,7 +517,7 @@ extension DetailedUsage {
             || email != nil
             || dailyHistory != nil || monthlyCost != nil
             || creditsRemaining != nil || creditsTotal != nil
-            || authSource != nil || geminiAccounts != nil
+            || authSource != nil || authUsageSummary != nil || geminiAccounts != nil
             || tokenUsagePercent != nil || tokenUsageReset != nil
             || tokenUsageUsed != nil || tokenUsageTotal != nil
             || mcpUsagePercent != nil || mcpUsageReset != nil

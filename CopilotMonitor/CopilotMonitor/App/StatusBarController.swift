@@ -526,7 +526,16 @@ final class StatusBarController: NSObject {
                let geminiAccounts = details.geminiAccounts,
                !geminiAccounts.isEmpty {
                 for account in geminiAccounts {
-                    let key = SubscriptionSettingsManager.shared.subscriptionKey(for: .geminiCLI, accountId: account.email)
+                    let subscriptionAccountId: String?
+                    if let accountId = account.accountId, !accountId.isEmpty {
+                        subscriptionAccountId = accountId
+                    } else {
+                        subscriptionAccountId = account.email
+                    }
+                    let key = SubscriptionSettingsManager.shared.subscriptionKey(
+                        for: .geminiCLI,
+                        accountId: subscriptionAccountId
+                    )
                     keys.insert(key)
                 }
                 continue
@@ -935,10 +944,57 @@ final class StatusBarController: NSObject {
                     )
                     let showAuthLabel = authLabels.count > 1
                     let baseName = multiAccountBaseName(for: identifier)
+                    let codexEmailByAccountId: [String: String]
+                    if identifier == .codex {
+                        codexEmailByAccountId = Dictionary(
+                            uniqueKeysWithValues: TokenManager.shared.getOpenAIAccounts().compactMap { account in
+                                guard let accountId = account.accountId?
+                                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                                      !accountId.isEmpty,
+                                      let email = account.email?
+                                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                                      !email.isEmpty else {
+                                    return nil
+                                }
+                                return (accountId, email)
+                            }
+                        )
+                    } else {
+                        codexEmailByAccountId = [:]
+                    }
                     for account in accounts {
                         hasQuota = true
                         var displayName = accounts.count > 1 ? "\(baseName) #\(account.accountIndex + 1)" : baseName
-                        if accounts.count > 1, showAuthLabel {
+
+                        let codexEmail: String?
+                        if identifier == .codex,
+                           let detailsEmail = account.details?.email?
+                            .trimmingCharacters(in: .whitespacesAndNewlines),
+                           !detailsEmail.isEmpty {
+                            codexEmail = detailsEmail
+                        } else if identifier == .codex,
+                                  let accountId = account.accountId?
+                            .trimmingCharacters(in: .whitespacesAndNewlines),
+                                  !accountId.isEmpty,
+                                  let mappedEmail = codexEmailByAccountId[accountId],
+                                  !mappedEmail.isEmpty {
+                            codexEmail = mappedEmail
+                        } else if identifier == .codex,
+                                  let fallbackEmail = codexEmailByAccountId.values.first,
+                                  accounts.count == 1 {
+                            // Single-account fallback for legacy cached results that may miss accountId.
+                            codexEmail = fallbackEmail
+                        } else {
+                            codexEmail = nil
+                        }
+
+                        if let codexEmail {
+                            if accounts.count > 1 {
+                                displayName += " (\(codexEmail))"
+                            } else {
+                                displayName = "\(baseName) (\(codexEmail))"
+                            }
+                        } else if accounts.count > 1, showAuthLabel {
                             let sourceLabel = authSourceLabel(for: account.details?.authSource, provider: identifier) ?? "Unknown"
                             displayName += " (\(sourceLabel))"
                         }
@@ -949,7 +1005,7 @@ final class StatusBarController: NSObject {
                         // Build percentage array for display
                         // Claude: show 5h, 7d, and extra usage (if enabled)
                         // Kimi: show both 5h and 7d usage windows
-                        // Codex: show both primary (5h) and secondary (weekly) windows
+                        // Codex: show base primary/weekly plus Spark primary/weekly windows
                         // Z.AI: show both 5h token window and MCP usage
                         // Other providers: show single usage percentage
                         let usedPercents: [Double]
@@ -970,9 +1026,18 @@ final class StatusBarController: NSObject {
                                   let fiveHour = account.details?.fiveHourUsage,
                                   let sevenDay = account.details?.sevenDayUsage {
                             usedPercents = [fiveHour, sevenDay]
-                        } else if identifier == .codex,
-                                  let secondary = account.details?.secondaryUsage {
-                            usedPercents = [account.usage.usagePercentage, secondary]
+                        } else if identifier == .codex {
+                            var percents = [account.usage.usagePercentage]
+                            if let secondary = account.details?.secondaryUsage {
+                                percents.append(secondary)
+                            }
+                            if let sparkPrimary = account.details?.sparkUsage {
+                                percents.append(sparkPrimary)
+                            }
+                            if let sparkSecondary = account.details?.sparkSecondaryUsage {
+                                percents.append(sparkSecondary)
+                            }
+                            usedPercents = percents
                         } else if identifier == .zaiCodingPlan {
                             let percents = [account.details?.tokenUsagePercent, account.details?.mcpUsagePercent].compactMap { $0 }
                             usedPercents = percents.isEmpty ? [account.usage.usagePercentage] : percents
@@ -1014,9 +1079,18 @@ final class StatusBarController: NSObject {
                               let fiveHour = result.details?.fiveHourUsage,
                               let sevenDay = result.details?.sevenDayUsage {
                         usedPercents = [fiveHour, sevenDay]
-                    } else if identifier == .codex,
-                              let secondary = result.details?.secondaryUsage {
-                        usedPercents = [singlePercent, secondary]
+                    } else if identifier == .codex {
+                        var percents = [singlePercent]
+                        if let secondary = result.details?.secondaryUsage {
+                            percents.append(secondary)
+                        }
+                        if let sparkPrimary = result.details?.sparkUsage {
+                            percents.append(sparkPrimary)
+                        }
+                        if let sparkSecondary = result.details?.sparkSecondaryUsage {
+                            percents.append(sparkSecondary)
+                        }
+                        usedPercents = percents
                     } else if identifier == .zaiCodingPlan {
                         let percents = [result.details?.tokenUsagePercent, result.details?.mcpUsagePercent].compactMap { $0 }
                         usedPercents = percents.isEmpty ? [singlePercent] : percents
@@ -1068,12 +1142,17 @@ final class StatusBarController: NSObject {
                     hasQuota = true
                     let accountNumber = account.accountIndex + 1
                     let usedPercent = 100 - account.remainingPercentage
-                    var displayName = geminiAccounts.count > 1
-                        ? "Gemini CLI #\(accountNumber)"
-                        : "Gemini CLI"
-                    if geminiAccounts.count > 1, showGeminiAuthLabel {
+                    let normalizedEmail = account.email.trimmingCharacters(in: .whitespacesAndNewlines)
+                    var displayName = "Gemini CLI"
+
+                    if !normalizedEmail.isEmpty, normalizedEmail.lowercased() != "unknown" {
+                        displayName = "Gemini CLI (\(normalizedEmail))"
+                    } else if geminiAccounts.count > 1, showGeminiAuthLabel {
+                        displayName = "Gemini CLI #\(accountNumber)"
                         let sourceLabel = authSourceLabel(for: account.authSource, provider: .geminiCLI) ?? "Unknown"
                         displayName += " (\(sourceLabel))"
+                    } else if geminiAccounts.count > 1 {
+                        displayName = "Gemini CLI #\(accountNumber)"
                     }
                     let item = createNativeQuotaMenuItem(
                         name: displayName,
@@ -1198,54 +1277,88 @@ final class StatusBarController: NSObject {
     }
 
     private func authSourceLabel(for authSource: String?, provider: ProviderIdentifier) -> String? {
-        guard let authSource = authSource, !authSource.isEmpty else { return nil }
-        let lowercased = authSource.lowercased()
+        guard let authSource, !authSource.isEmpty else { return nil }
 
-        if lowercased.contains("opencode") {
-            return "OpenCode"
-        }
+        func parseSingleSource(_ rawSource: String) -> String? {
+            let lowercased = rawSource.lowercased()
 
-        switch provider {
-        case .codex:
-            if lowercased.contains(".codex") || lowercased.contains("/codex/") {
-                return "Codex"
+            if lowercased.contains("opencode") {
+                return "OpenCode"
             }
-        case .claude:
+
+            switch provider {
+            case .codex:
+                if lowercased.contains(".codex-lb") || lowercased.contains("/codex-lb/") || lowercased.contains("codex lb") {
+                    return "Codex LB"
+                }
+                if lowercased.contains(".codex") || lowercased.contains("/codex/") || lowercased == "codex" {
+                    return "Codex"
+                }
+            case .claude:
+                if lowercased.contains("claude code (keychain)") || lowercased.contains("keychain") {
+                    return "Claude Code (Keychain)"
+                }
+                if lowercased.contains("claude code (legacy)") || lowercased.contains(".credentials.json") || lowercased.contains(".claude") {
+                    return "Claude Code (Legacy)"
+                }
+                if lowercased.contains("claude-code") || lowercased.contains("claude code") {
+                    return "Claude Code"
+                }
+            case .copilot:
+                if lowercased.contains("browser cookies") {
+                    return "Browser Cookies"
+                }
+                if lowercased.contains("github-copilot") {
+                    if lowercased.contains("hosts.json") {
+                        return "VS Code (hosts.json)"
+                    }
+                    if lowercased.contains("apps.json") {
+                        return "VS Code (apps.json)"
+                    }
+                    return "VS Code"
+                }
+            case .geminiCLI:
+                if lowercased.contains("antigravity") {
+                    return "Antigravity"
+                }
+                if lowercased.contains(".gemini/oauth_creds.json")
+                    || lowercased.contains("/.gemini/oauth_creds.json")
+                    || lowercased.contains("oauth_creds.json") {
+                    return "Gemini CLI"
+                }
+            default:
+                break
+            }
+
             if lowercased.contains("keychain") {
-                return "Claude Code (Keychain)"
+                return "Keychain"
             }
-            if lowercased.contains("claude-code") {
-                return "Claude Code"
-            }
-            if lowercased.contains(".credentials.json") || lowercased.contains(".claude") {
-                return "Claude Code (Legacy)"
-            }
-        case .copilot:
-            if lowercased.contains("browser cookies") {
-                return "Browser Cookies"
-            }
-            if lowercased.contains("github-copilot") {
-                if lowercased.contains("hosts.json") {
-                    return "VS Code (hosts.json)"
-                }
-                if lowercased.contains("apps.json") {
-                    return "VS Code (apps.json)"
-                }
-                return "VS Code"
-            }
-        case .geminiCLI:
-            if lowercased.contains("antigravity") {
-                return "Antigravity"
-            }
-        default:
-            break
+
+            return nil
         }
 
-        if lowercased.contains("keychain") {
-            return "Keychain"
+        let parts = authSource
+            .components(separatedBy: CharacterSet(charactersIn: ",;|"))
+            .flatMap { segment in
+                segment.components(separatedBy: " + ")
+            }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        let sourceParts = parts.isEmpty ? [authSource] : parts
+        var labels: [String] = []
+        for part in sourceParts {
+            guard let label = parseSingleSource(part), !labels.contains(label) else { continue }
+            labels.append(label)
         }
 
-        return nil
+        if labels.isEmpty {
+            return parseSingleSource(authSource)
+        }
+        if labels.count == 1 {
+            return labels.first
+        }
+        return labels.joined(separator: " + ")
     }
 
     /// Color for usage percentage: 70%+ → orange, 90%+ → red

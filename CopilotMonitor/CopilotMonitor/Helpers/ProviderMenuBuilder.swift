@@ -167,7 +167,9 @@ extension StatusBarController {
         case .copilot:
             // === Usage ===
             if let used = details.copilotUsedRequests, let limit = details.copilotLimitRequests, limit > 0 {
-                let filledBlocks = Int((Double(used) / Double(max(limit, 1))) * 10)
+                let usageRatio = Double(used) / Double(max(limit, 1))
+                let normalizedUsageRatio = min(max(usageRatio, 0), 1)
+                let filledBlocks = Int(normalizedUsageRatio * 10)
                 let emptyBlocks = 10 - filledBlocks
                 let progressBar = String(repeating: "═", count: filledBlocks) + String(repeating: "░", count: emptyBlocks)
                 let progressItem = NSMenuItem()
@@ -325,25 +327,61 @@ extension StatusBarController {
 
         case .codex:
             // === Usage Windows ===
+            let sparkLabel = {
+                guard let rawLabel = details.sparkWindowLabel else { return "Spark" }
+                let normalized = rawLabel
+                    .replacingOccurrences(of: "_window", with: "", options: .caseInsensitive)
+                    .replacingOccurrences(of: "-", with: " ")
+                    .replacingOccurrences(of: "_", with: " ")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !normalized.isEmpty else { return "Spark" }
+                if normalized.lowercased() == normalized {
+                    return normalized.capitalized
+                }
+                return normalized
+            }()
+
+            var baseUsageRows: [(label: String, usage: Double, resetDate: Date?, windowHours: Int?)] = []
             if let primary = details.dailyUsage {
                 // BUGFIX: Codex primary window is 5 hours, not 24
+                baseUsageRows.append((label: "5h", usage: primary, resetDate: details.primaryReset, windowHours: 5))
+            }
+            if let secondary = details.secondaryUsage {
+                baseUsageRows.append((label: "Weekly", usage: secondary, resetDate: details.secondaryReset, windowHours: 168))
+            }
+
+            for (index, row) in baseUsageRows.enumerated() {
+                if index > 0 {
+                    submenu.addItem(NSMenuItem.separator())
+                }
                 let items = createUsageWindowRow(
-                    label: "5h",
-                    usagePercent: primary,
-                    resetDate: details.primaryReset,
-                    windowHours: 5
+                    label: row.label,
+                    usagePercent: row.usage,
+                    resetDate: row.resetDate,
+                    windowHours: row.windowHours
                 )
                 items.forEach { submenu.addItem($0) }
             }
-            if details.dailyUsage != nil, details.secondaryUsage != nil {
+
+            var sparkUsageRows: [(label: String, usage: Double, resetDate: Date?, windowHours: Int?)] = []
+            if let sparkPrimary = details.sparkUsage {
+                sparkUsageRows.append((label: "5h (\(sparkLabel))", usage: sparkPrimary, resetDate: details.sparkReset, windowHours: 5))
+            }
+            if let sparkSecondary = details.sparkSecondaryUsage {
+                sparkUsageRows.append((label: "Weekly (\(sparkLabel))", usage: sparkSecondary, resetDate: details.sparkSecondaryReset, windowHours: 168))
+            }
+            if !sparkUsageRows.isEmpty, !baseUsageRows.isEmpty {
                 submenu.addItem(NSMenuItem.separator())
             }
-            if let secondary = details.secondaryUsage {
+            for (index, row) in sparkUsageRows.enumerated() {
+                if index > 0 {
+                    submenu.addItem(NSMenuItem.separator())
+                }
                 let items = createUsageWindowRow(
-                    label: "Weekly",
-                    usagePercent: secondary,
-                    resetDate: details.secondaryReset,
-                    windowHours: 168
+                    label: row.label,
+                    usagePercent: row.usage,
+                    resetDate: row.resetDate,
+                    windowHours: row.windowHours
                 )
                 items.forEach { submenu.addItem($0) }
             }
@@ -358,6 +396,15 @@ extension StatusBarController {
             if let credits = details.creditsBalance {
                 let item = NSMenuItem()
                 item.view = createDisabledLabelView(text: String(format: "Credits: $%.2f", credits))
+                submenu.addItem(item)
+            }
+            let codexEmail = details.email ?? codexEmail(for: accountId)
+            if let email = codexEmail {
+                let item = NSMenuItem()
+                item.view = createDisabledLabelView(
+                    text: "Email: \(email)",
+                    icon: NSImage(systemSymbolName: "person.circle", accessibilityDescription: "User Email")
+                )
                 submenu.addItem(item)
             }
 
@@ -707,11 +754,34 @@ extension StatusBarController {
             submenu.addItem(authItem)
         }
 
+        if let authUsageSummary = details.authUsageSummary, !authUsageSummary.isEmpty {
+            if details.authSource == nil {
+                submenu.addItem(NSMenuItem.separator())
+            }
+            let usageItem = NSMenuItem()
+            usageItem.view = createDisabledLabelView(
+                text: "Using in: \(authUsageSummary)",
+                icon: NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "Auth Usage")
+            )
+            submenu.addItem(usageItem)
+        }
+
         return submenu
     }
 
     private func addHorizontalDivider(to submenu: NSMenu) {
         submenu.addItem(NSMenuItem.separator())
+    }
+
+    private func codexEmail(for accountId: String?) -> String? {
+        guard let accountId = accountId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !accountId.isEmpty else {
+            return nil
+        }
+
+        return TokenManager.shared.getOpenAIAccounts().first { account in
+            account.accountId == accountId
+        }?.email
     }
 
     private func addGroupedModelUsageSection(
@@ -791,13 +861,20 @@ extension StatusBarController {
             debugContext: "createGeminiAccountSubmenu(\(account.email))"
         )
 
-        let accountItems: [(sfSymbol: String, text: String)] = [
+        var accountItems: [(sfSymbol: String, text: String)] = [
             (sfSymbol: "person.circle", text: "Email: \(account.email)"),
             (sfSymbol: "key", text: "Token From: \(account.authSource)")
         ]
+        if let accountId = account.accountId, !accountId.isEmpty {
+            accountItems.insert((sfSymbol: "number.circle", text: "Account ID: \(accountId)"), at: 1)
+        }
+        if let authUsageSummary = account.authUsageSummary, !authUsageSummary.isEmpty {
+            accountItems.append((sfSymbol: "arrow.triangle.branch", text: "Using in: \(authUsageSummary)"))
+        }
         createAccountInfoSection(items: accountItems).forEach { submenu.addItem($0) }
 
-        addSubscriptionItems(to: submenu, provider: .geminiCLI, accountId: account.email)
+        let subscriptionAccountId = (account.accountId?.isEmpty == false) ? account.accountId : account.email
+        addSubscriptionItems(to: submenu, provider: .geminiCLI, accountId: subscriptionAccountId)
 
         return submenu
     }
